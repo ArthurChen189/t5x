@@ -409,12 +409,15 @@ class Transformer(nn.Module):
     Returns:
       logits array from full transformer.
     """
+    encoder_input_tokens = encoder_input_tokens.reshape([-1,encoder_input_tokens.shape[-1]])
+    decoder_input_tokens = decoder_input_tokens.reshape([-1, decoder_input_tokens.shape[-1]])
+    decoder_target_tokens = decoder_target_tokens.reshape([-1, decoder_target_tokens.shape[-1]])
     encoded = self.encode(
         encoder_input_tokens,
         encoder_segment_ids=encoder_segment_ids,
         enable_dropout=enable_dropout)
 
-    return self.decode(
+    logits = self.decode(
         encoded,
         encoder_input_tokens,  # only used for masks
         decoder_input_tokens,
@@ -424,3 +427,5 @@ class Transformer(nn.Module):
         decoder_positions=decoder_positions,
         enable_dropout=enable_dropout,
         decode=decode)
+    logits = logits.reshape([8, 10, -1])
+    return logits

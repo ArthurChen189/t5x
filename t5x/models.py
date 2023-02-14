@@ -530,9 +530,10 @@ class EncoderDecoderModel(BaseTransformerModel):
         the batch of predictions, with the entire beam if requested
         an auxiliary dictionary of decoder scores
     """
-    # Prepare zeroed-out autoregressive cache.
+    # Prepare zeroed-out autoregressive cache
     # [batch, input_len]
     inputs = batch['encoder_input_tokens']
+    inputs = inputs.reshape([-1, inputs.shape[-1]])
     # [batch, target_len]
     target_shape = batch['decoder_input_tokens'].shape
     target_type = batch['decoder_input_tokens'].dtype
@@ -590,7 +591,7 @@ class EncoderDecoderModel(BaseTransformerModel):
           decoder_prompt_inputs != self.output_vocabulary.eos_id)
     else:
       decoder_prompt_inputs = jnp.zeros_like(batch['decoder_input_tokens'])
-
+    decoder_prompt_inputs = decoder_prompt_inputs.reshape([-1, decoder_prompt_inputs.shape[-1]])
     # TODO(hwchung): rename the returned value names to more generic ones.
     # Using the above-defined single-step decoder function, run a
     # beam search over possible sequences given input encoding.
@@ -607,7 +608,6 @@ class EncoderDecoderModel(BaseTransformerModel):
         num_decodes=num_decodes,
         cache_offset=1 if scanned else 0,
         **decoder_params)
-
     # Beam search returns [n_batch, n_beam, n_length] with beam dimension sorted
     # in increasing order of log-probability.
     # Return the highest scoring beam sequence.

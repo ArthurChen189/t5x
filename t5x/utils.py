@@ -1359,6 +1359,7 @@ def get_infer_fn(infer_step: InferStepCallable, batch_size: int,
     # Run inference for each replica set.
     batched_results, all_indices = [], []
     for index, infer_batch in sharded_ds.as_numpy_iterator():
+      #print(f"@util, index is {index}\tinfer_batch is {infer_batch['label'].shape}")
       if rng is None:
         step_rng = None
       else:
@@ -1381,7 +1382,6 @@ def get_infer_fn(infer_step: InferStepCallable, batch_size: int,
         batch_indices, batch_result = partitioned_infer_step(
             train_state.params, infer_batch, step_rng, index)
         logging.info('Inference of batch %s done.', index)
-
       def _copy_to_host_async(x):
         if isinstance(x, GlobalDeviceArray):
           if hasattr(x, 'addressable_data'):
@@ -1401,15 +1401,14 @@ def get_infer_fn(infer_step: InferStepCallable, batch_size: int,
       except AttributeError:
         # Similar to jax.device_get, we skip transfers for non DeviceArrays.
         pass
-
+     #print(f"bathced_results: \n{batch_result}")
       batched_results.append(batch_result)
       all_indices.append(batch_indices)
 
     logging.info('Inference of all batches done.')
     all_inferences = batched_results
-
     # List[B * shard_count, ...] -> [B * shard_count * batch_count, ...]
-    all_inferences = jax.tree_map(lambda *args: np.concatenate(args),
+    all_inferences = jax.tree_map(lambda *args: np.concatenate(args).reshape(-1, 10),
                                   *all_inferences)
     all_indices = np.concatenate(all_indices)
 
@@ -1419,6 +1418,7 @@ def get_infer_fn(infer_step: InferStepCallable, batch_size: int,
     # Note: remove padding first, as -1 indices would mess up this operation.
     # Note: all_inferences may be a PyTree, not just an array, e.g. if
     # `infer_step` is `model.predict_batch_with_aux`.
+    #print(f"all indices are :\n{all_indices.shape}\nall_inferences are :\n{all_inferences[0].shape}")
     all_inferences = jax.tree_map(lambda x: x[all_indices], all_inferences)
     all_indices = all_indices[all_indices]
 
@@ -1460,7 +1460,6 @@ def get_infer_fn(infer_step: InferStepCallable, batch_size: int,
     else:
       aux_values = jax.tree_map(lambda x: np.array(x).tolist(), aux_values)
       return indices_and_outputs, aux_values
-
   return infer_fn
 
 

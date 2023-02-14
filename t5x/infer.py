@@ -128,6 +128,7 @@ def create_task_from_tfexample_file(paths: Sequence[str],
     Name of the newly-registered Task. This Task has a split named 'infer' that
     contains the preprocessed and featurized input dataset.
   """
+  #print(f"inputs_key: {inputs_key}")
   # tf.io.gfile.glob supports lists, in contrast to gfile.glob.
   files = tf.io.gfile.glob(paths)
   if files:
@@ -238,7 +239,6 @@ def write_inferences_to_file(
   if mode in ('predict', 'predict_with_aux') and vocabulary is None:
     raise ValueError('The `vocabulary` parameter is required in `predict` and '
                      '`predict_with_aux` modes')
-
   def _json_compat(value):
     if isinstance(value, bytes):
       return value.decode('utf-8')
@@ -258,6 +258,7 @@ def write_inferences_to_file(
         ' simultaneously.')
   with gfile.GFile(path, 'w') as f:
     for i, inp in task_ds.enumerate().as_numpy_iterator():
+      # write to file
       predictions = all_predictions[i]
       aux_values = jax.tree_map(
           f=lambda v, i=i: v[i],
@@ -274,7 +275,7 @@ def write_inferences_to_file(
              k[:-len('_pretokenized')] in input_fields_to_include)
         }
       else:
-        inputs = {k: v for k, v in inp.items() if k.endswith('_pretokenized')}
+        inputs = {k: v for k, v in inp.items() if k.endswith('_pretokenized') or k == 'qid' or k == 'pid'}
 
       json_dict = {}
       json_dict['inputs'] = {k: _json_compat(v) for k, v in inputs.items()}
@@ -418,7 +419,8 @@ def infer(
     raise ValueError(
         "`mode` must be one of 'predict', 'score' or 'predict_with_aux'. "
         f"Got '{mode}'")
-
+  mode = 'predict_with_aux'
+  #print(f"mode is {mode}\n")
   # Remove double-slashes in directory path to avoid inconsistencies.
   output_dir = re.sub(r'(?<!gs:)([\/]{2,})', '/', output_dir)
   if verify_matching_vocabs_fn is not None:
@@ -431,7 +433,8 @@ def infer(
     utils.import_module(dataset_cfg.module)
   host_shard_info = seqio.ShardInfo(index=shard_id, num_shards=num_shards)
   task_or_mixture = seqio.get_mixture_or_task(dataset_cfg.mixture_or_task_name)
-
+  #print(f"task_or_mixture\nname: {task_or_mixture.name}\tsource: {task_or_mixture.source}\toutput_features: {task_or_mixture.output_features}")
+  #print(f"preprocessor: {task_or_mixture.preprocessors}")
   feature_converter = model.FEATURE_CONVERTER_CLS(pack=False)
 
   def _get_dataset(dataset_provider):
@@ -475,7 +478,6 @@ def infer(
     utils.log_model_info(model_info_log_file,
                          train_state_initializer.global_train_state_shape,
                          partitioner)
-
   # Disable strictness since we are dropping the optimizer state.
   restore_checkpoint_cfg.strict = False
 
@@ -509,22 +511,25 @@ def infer(
 
     logging.info("Loading dataset for task '%s'.", task.name)
     ds = _get_dataset(task)
-
     model_ds = feature_converter(
         ds, task_feature_lengths=dataset_cfg.task_feature_lengths)
 
     # Zip task and model features.
     # (task, model)
+    def to_tensor(x):
+        for key,value in x.items():
+            if not isinstance(value, tf.Tensor):
+                x[key] = value.to_tensor(default_value=0)
+        return x
+    ds = ds.map(lambda x: to_tensor(x))
     infer_ds = tf.data.Dataset.zip((ds, model_ds))
-
     # Create batches the size of each chunk and index them.
     # (i, [(task, model)] * chunk_size)
     infer_ds = infer_ds.padded_batch(
         checkpoint_period * batch_size, drop_remainder=False).enumerate()
-
     infer_ds_iter: Iterator[Tuple[int, Any]] = iter(infer_ds.prefetch(AUTOTUNE))
-
-    if checkpoint_ds_iter:
+    if False:
+    #if checkpoint_ds_iter:
       # Create checkpoint manager and restore state, if applicable.
       ckpt_path = os.path.join(tmp_dir, 'input.ckpt')
 
@@ -569,33 +574,32 @@ def infer(
     # Main Loop over "chunks".
     for chunk, chunk_batch in infer_ds_iter:
       logging.info('Starting chunk %d', chunk)
-
       chunk_tick = time.time()
-
 
       # Load the dataset for the next chunk. We can't use `infer_ds_iter`
       # directly since `infer_fn` needs to know the exact size of each chunk,
       # which may be smaller for the final one.
       chunk_ds = tf.data.Dataset.from_tensor_slices(chunk_batch)
       chunk_ds.cache().prefetch(AUTOTUNE)
-
       # Unzip chunk dataset in to pretokenized and model datasets.
       task_ds = chunk_ds.map(lambda p, m: p, num_parallel_calls=AUTOTUNE)
       model_ds = chunk_ds.map(lambda p, m: m, num_parallel_calls=AUTOTUNE)
-
       # Get a chunk-specific RNG key.
       chunk_rng = jax.random.fold_in(jax.random.PRNGKey(0), chunk)
       chunk_path = os.path.join(tmp_dir, f'{output_fname}-chunk{chunk:05}')
-      if gfile.exists(chunk_path + '.COMPLETED') and not checkpoint_ds_iter:
+      if gfile.exists(chunk_path + '.COMPLETED'):
+      #if gfile.exists(chunk_path + '.COMPLETED') and not checkpoint_ds_iter:
         logging.info('Skipping chunk %s. Chunk file already exists.', chunk)
         continue
 
       logging.info('Running inference on %d batches.', checkpoint_period)
+      #print(f"chunk_batch is \n{chunk_batch}")
       infer_result = infer_fn(model_ds.enumerate(), rng=chunk_rng)
+      #print(f"infer_results: \n{infer_result[0]}\ninfer[1] :\n{infer_result[1]}")
+
       inferences: Tuple[Sequence[Any], Mapping[str, Any]] = (
           _extract_tokens_and_aux_values(infer_result))
       num_examples = len(inferences[0])
-
       if jax.process_index() == 0:
         chunk_time = time.time() - chunk_tick
         logging.info('chunk completed in %02f seconds (%02f examples/sec).',
@@ -605,7 +609,8 @@ def infer(
                                   num_examples / chunk_time)
 
         chunk_ckpt_path = None
-        if checkpoint_ds_iter:
+        #if checkpoint_ds_iter:
+        if False:
           # Store iterator checkpoint in temporary location before writing the
           # model output asynchronously. After outputs are written, the
           # checkpoint will be moved to the canonical location to be used if
