@@ -55,6 +55,7 @@ _DEFAULT_GIN_SEARCH_PATHS = [
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
+LIST_SIZE = 10
 
 class SummarizeConfigFn(Protocol):
 
@@ -262,7 +263,7 @@ def write_inferences_to_file(
     for i, inp in task_ds.enumerate().as_numpy_iterator():
       predictions = all_predictions[i]
       aux_values = jax.tree_map(
-          f=lambda v, i=i: v[i],
+          f=lambda v, i=i: v[i * LIST_SIZE: i * LIST_SIZE + LIST_SIZE],
           tree=all_aux_values,
           is_leaf=lambda v: isinstance(v, (np.ndarray, list)),
       )
@@ -276,7 +277,7 @@ def write_inferences_to_file(
              k[:-len('_pretokenized')] in input_fields_to_include)
         }
       else:
-        inputs = {k: v for k, v in inp.items() if k.endswith('_pretokenized')}
+        inputs = {k: v for k, v in inp.items() if k.endswith('_pretokenized') or k == 'pid' or k == 'qid'}
 
       json_dict = {}
       json_dict['inputs'] = {k: _json_compat(v) for k, v in inputs.items()}
@@ -361,7 +362,7 @@ def infer(
     num_shards: int = 1,
     merge_chunked_results: bool = True,
     write_fn: WriteFn = write_inferences_to_file,
-    checkpoint_ds_iter: bool = True,
+    checkpoint_ds_iter: bool = False, # we do this during inference to avoid errors
     train_state_initializer_cls: Type[
         utils.TrainStateInitializer
     ] = utils.TrainStateInitializer,
@@ -525,6 +526,14 @@ def infer(
     logging.info("Loading dataset for task '%s'.", task.name)
     ds = _get_dataset(task)
 
+    # preprocess the dataset to avoid ragged tensors error
+    def to_tensor(x):
+      for key,value in x.items():
+        if not isinstance(value, tf.Tensor):
+          x[key] = value.to_tensor(default_value=0)
+      return x
+    ds = ds.map(lambda x: to_tensor(x))
+
     model_ds = feature_converter(
         ds, task_feature_lengths=dataset_cfg.task_feature_lengths)
 
@@ -601,7 +610,7 @@ def infer(
 
       # Unzip chunk dataset in to pretokenized and model datasets.
       task_ds = chunk_ds.map(lambda p, m: p, num_parallel_calls=AUTOTUNE)
-      model_ds = chunk_ds.map(lambda p, m: m, num_parallel_calls=AUTOTUNE)
+      model_ds = chunk_ds.map(lambda p, m: m, num_parallel_calls=AUTOTUNE).unbatch() # flatten the batch
 
       # Get a chunk-specific RNG key.
       chunk_rng = jax.random.fold_in(jax.random.PRNGKey(0), chunk)
